@@ -13,8 +13,9 @@
  *   k    — markPrice 30 s {lt, T, mark, index, fr funding}
  *   c    — CLOSED 1m klines only {t ms, o,h,l,c, v, tb takerBuy}
  *   f    — REST poll 15 min {lt, oi, vol24, chg24}
- *   hb   — heartbeat 60 s (silence = dead socket, not quiet tape)
- *   rc   — reconnect marker
+ *   l    — liquidation print (Binance SAMPLES this feed: counts are a floor)
+ *   hb   — heartbeat 60 s, written only while the WS is open (silence = dead socket)
+ *   rc   — reconnect / SIGTERM truncation marker
  *   rc1  — window-end REST kline cross-fill for the whole window (authoritative)
  * Run locally too: node collector-binance/record.js   (env: RECORD_MINUTES, default 350)
  */
@@ -43,6 +44,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 let ws = null;
 let file = null;
+let metaWritten = false;
 let count = 0;
 let lastBookWrite = 0;
 let lastRawWrite = 0;
@@ -59,7 +61,11 @@ function outFile() {
 }
 function write(line) {
   try {
-    if (!file) file = fs.createWriteStream(outFile(), { flags: 'a' });
+    if (!file) {
+      file = fs.createWriteStream(outFile(), { flags: 'a' });
+      // async write errors (ENOSPC/EMFILE) would kill the process mid-window
+      file.on('error', (e) => { console.error('file error:', e.message); try { file.end(); } catch (_) {} file = null; });
+    }
     file.write(line + '\n');
     count++;
     if (count % 5000 === 0) console.log('records:', count);
@@ -84,7 +90,11 @@ function connect() {
   const on = (ev, fn) => (typeof ws.on === 'function' ? ws.on(ev, fn) : ws.addEventListener(ev, fn));
   on('open', () => {
     console.log('connected', WS_URL.slice(0, 60) + '…');
-    write(JSON.stringify({ k: 'meta', v: SCHEMA, sym: SYMBOL, start: startedAtIso, durMin: MINUTES, sha: GIT_SHA }));
+    // meta = FIRST line, exactly once per window (rc markers own reconnects)
+    if (!metaWritten) {
+      metaWritten = true;
+      write(JSON.stringify({ k: 'meta', v: SCHEMA, sym: SYMBOL, start: startedAtIso, durMin: MINUTES, sha: GIT_SHA }));
+    }
   });
   on('message', (ev) => {
     const buf = ev.data != null ? (typeof ev.data === 'string' ? ev.data : ev.data.toString()) : '';
@@ -171,7 +181,7 @@ async function pollKline() {
     for (const r of rows) {
       const t = Number(r[0]);
       const closeTime = Number(r[6]);
-      if (closeTime >= nowMs || t === lastKlineT) continue; // forming or already recorded
+      if (closeTime >= nowMs || t <= lastKlineT) continue; // forming or already recorded (≤ guards the 60s poll re-reading older bars)
       lastKlineT = t;
       write(JSON.stringify({ k: 'c', t, o: r[1], h: r[2], l: r[3], c: r[4], v: r[5], tb: r[9] }));
     }
@@ -217,4 +227,9 @@ async function finish() {
   setTimeout(() => process.exit(0), 2000);
 }
 setTimeout(finish, MINUTES * 60 * 1000);
-process.on('SIGTERM', () => { try { if (file) file.end(); } catch (e) {} process.exit(0); });
+process.on('SIGTERM', () => {
+  // mark the truncation, flush, THEN exit — the old path lost the tail rows
+  try { write(JSON.stringify({ k: 'rc', lt: new Date().toISOString(), note: 'SIGTERM truncation' })); } catch (e) {}
+  try { if (file) file.end(() => process.exit(0)); else process.exit(0); } catch (e) { process.exit(0); }
+  setTimeout(() => process.exit(0), 1500);
+});

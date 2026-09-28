@@ -35,6 +35,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 let ws = null;
 let file = null;
+let metaWritten = false;
 let count = 0;
 let lastBookWrite = 0;
 let lastTickerWrite = 0;
@@ -52,7 +53,12 @@ function outFile() {
 }
 function write(line) {
   try {
-    if (!file) file = fs.createWriteStream(outFile(), { flags: 'a' });
+    if (!file) {
+      file = fs.createWriteStream(outFile(), { flags: 'a' });
+      // createWriteStream errors are ASYNC (ENOSPC/EMFILE): without this handler
+      // the process dies mid-window with no marker and the commit step never runs
+      file.on('error', (e) => { console.error('file error:', e.message); try { file.end(); } catch (_) {} file = null; });
+    }
     file.write(line + '\n');
     count++;
     if (count % 5000 === 0) console.log('records:', count);
@@ -77,9 +83,11 @@ function connect() {
   const on = (ev, fn) => (typeof ws.on === 'function' ? ws.on(ev, fn) : ws.addEventListener(ev, fn));
   on('open', () => {
     console.log('connected', WS_URL);
-    // meta must be the FIRST line of every window: the merge script derives
-    // interval ownership (dedupe) and window duration from it
-    write(JSON.stringify({ k: 'meta', v: SCHEMA_VERSION, sym: SYMBOL, start: startedAtIso, durMin: MINUTES, sha: GIT_SHA }));
+    // meta = FIRST line, exactly once per window (rc markers own reconnects)
+    if (!metaWritten) {
+      metaWritten = true;
+      write(JSON.stringify({ k: 'meta', v: SCHEMA_VERSION, sym: SYMBOL, start: startedAtIso, durMin: MINUTES, sha: GIT_SHA }));
+    }
     // core channels first — schema-verified, the engine's own inputs
     ws.send(JSON.stringify({ type: 'subscribe', payload: { channels: [
       { name: 'trades', symbols: [SYMBOL] },
@@ -162,8 +170,10 @@ async function crossfillCandles() {
   const url = `${REST_CANDLES}?resolution=1m&symbol=${SYMBOL}&start=${startSec}&end=${endSec}`;
   try {
     const rows = (await getJson(url)).result || [];
-    for (const c of rows) write(JSON.stringify({ k: 'rc1', t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume }));
-    console.log('crossfill candles:', rows.length);
+    // drop the still-forming last candle — rc1 rows are authoritative CLOSED bars
+    const closedRows = rows.filter((c) => Number(c.time) <= endSec - 60);
+    for (const c of closedRows) write(JSON.stringify({ k: 'rc1', t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume }));
+    console.log('crossfill candles:', closedRows.length);
   } catch (e) { console.error('crossfill candles:', e.message); }
 }
 
@@ -174,8 +184,13 @@ connect();
 
 // liveness marker: silence in the tape must mean "quiet tape", never "dead
 // socket" — the merge script measures outages from hb gaps
+// liveness marker: written ONLY while the socket is open — a half-open TCP
+// connection fires no 'close', so hb gaps (cross-checked vs trade recency by
+// query.py) are the dead-socket signal
 const hbTimer = setInterval(() => {
-  write(JSON.stringify({ k: 'hb', lt: new Date().toISOString() }));
+  if (ws && (ws.readyState === 1)) {
+    write(JSON.stringify({ k: 'hb', lt: new Date().toISOString() }));
+  }
 }, 60000);
 
 const flushTimer = setInterval(() => {
@@ -190,4 +205,9 @@ async function finish() {
   setTimeout(() => process.exit(0), 2000);
 }
 setTimeout(finish, MINUTES * 60 * 1000);
-process.on('SIGTERM', () => { try { if (file) file.end(); } catch (e) {} process.exit(0); });
+process.on('SIGTERM', () => {
+  // mark the truncation, flush, THEN exit — the old path lost the tail rows
+  try { write(JSON.stringify({ k: 'rc', lt: new Date().toISOString(), note: 'SIGTERM truncation' })); } catch (e) {}
+  try { if (file) file.end(() => process.exit(0)); else process.exit(0); } catch (e) { process.exit(0); }
+  setTimeout(() => process.exit(0), 1500); // flush watchdog
+});

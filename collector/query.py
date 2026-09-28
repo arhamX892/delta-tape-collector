@@ -73,10 +73,11 @@ def fnum(x):
         return None
 
 def snapshot(kinds, at_sec):
-    us = at_sec * 1e6 if at_sec else None
+    us = at_sec * 1e6 if at_sec is not None else None
     if us is None:
         tr = kinds.get("t", [])
         us = tr[-1]["t"] if tr else (kinds.get("o", [{}])[-1].get("ts") if kinds.get("o") else 0)
+        at_sec = us / 1e6
     print(f"== SNAPSHOT at {iso_us(us)} UTC ==")
     tr = nearest(kinds.get("t", []), us, "t", max_before_us=30e6)
     if tr:
@@ -116,12 +117,25 @@ def gaps(kinds, files):
     print(f"files: {files}   reconnects(rc): {len(kinds.get('rc', []))}   heartbeats: {len(hb)}")
     prev = None
     holes = 0
+    # segment per recording window: hb from two different files are hours apart BY
+    # DESIGN — only flag gaps INSIDE a window (reset prev at each meta boundary)
+    metas = sorted(kinds.get("meta", []), key=lambda r: r.get("start") or "")
+    window_starts = []
+    for m in metas:
+        try:
+            window_starts.append(datetime.fromisoformat(m["start"].replace("Z", "+00:00")).timestamp())
+        except Exception:
+            pass
     for r in hb:
         t = datetime.fromisoformat(r["lt"].replace("Z", "+00:00")).timestamp()
-        if prev is not None and t - prev > 90:
+        new_window = any(ws - 30 <= t < ws + 120 for ws in window_starts)
+        if prev is not None and not new_window and t - prev > 90:
             holes += 1
             print(f"GAP {prev_str} -> {r['lt'][:-5]}  ({t-prev:.0f}s)")
-        prev, prev_str = t, r["lt"][:-5]
+        if new_window:
+            prev, prev_str = None, None  # window boundary: never compare across files
+        else:
+            prev, prev_str = t, r["lt"][:-5]
     if not holes:
         print("no heartbeat gaps > 90s — recorder healthy across all windows")
     for r in kinds.get("rc", []):
@@ -133,8 +147,8 @@ def stats(kinds, files):
     print(f"files: {files}")
     labels = {"meta": "window metadata", "t": "trades", "c": "candle frames (WS, cumulative)",
               "o": "book L1 snapshots (1Hz)", "k": "ticker snapshots (30s)", "f": "funding/OI polls (15min)",
-              "x": "raw experimental frames", "hb": "heartbeats (60s)", "rc": "reconnect markers",
-              "rc1": "REST authoritative candles"}
+              "x": "raw experimental frames", "l": "liquidation prints (sampled by Binance)",
+              "hb": "heartbeats (60s)", "rc": "reconnect markers", "rc1": "REST authoritative candles"}
     for k, rows in sorted(kinds.items()):
         span = ""
         if k == "t" and rows:

@@ -44,7 +44,9 @@ jobs:
       - name: record tape
         run: node collector/record.js
         env:
-          RECORD_MINUTES: ${{ github.event.schedule == '27 */6 * * *' && '45' || '350' }}
+          # 340 min (not 350): leaves real room for checkout + crossfill + rebase +
+          # push inside the 355-min cap — a killed job loses its whole window
+          RECORD_MINUTES: ${{ github.event.schedule == '27 */6 * * *' && '45' || '340' }}
           GIT_SHA: ${{ github.sha }}
 
       - name: commit tape
@@ -53,8 +55,8 @@ jobs:
           git config user.email "tape-bot@users.noreply.github.com"
           # another window may have committed while we were recording —
           # replay our commit on top before pushing (per-window files make
-          # this conflict-free)
+          # this conflict-free); retry: parallel groups can push concurrently
           git pull --rebase origin main
           git add data/
           git diff --cached --quiet || git commit -m "tape ${{ github.run_id }} $(date -u +%F-%H%M)"
-          git push
+          for i in 1 2 3; do git push && break || sleep 15; done
