@@ -7,8 +7,10 @@ name: tape-collector
 #   - bridge windows: 4x/day, 25 min, starting 20 min before each seam so the
 #     gap between main windows is covered even if GitHub delays the cron a
 #     few minutes (05:40 11:40 17:40 23:40 UTC).
-# Both append to the same tape-<UTC-date>.ndjson, so the seam overlap shows
-# up as duplicated rows — dedupe exact duplicate rows at merge/training time.
+# One NDJSON file per recording window (tape-<date>-<startHHMM>.ndjson), so
+# seam overlap lands in separate files — dedupe by trade timestamp at merge.
+# NOTE: GitHub may auto-disable schedules after 60 days with no repo activity —
+# the daily commits below keep the repo active.
 # Runs free on a public repo (private repos also fit the 2000 free min/month).
 
 on:
