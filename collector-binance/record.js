@@ -137,6 +137,39 @@ async function pollRest() {
   } catch (e) { console.error('rest poll:', e.message); }
 }
 
+const REST_PREMIUM = 'https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT';
+
+// mark/funding fallback: premiumIndex REST every 30s — guarantees the funding
+// record even where the markPrice WS stream stays silent (observed locally)
+async function pollMark() {
+  const now = Date.now();
+  if (now - lastMarkWrite < 30000) return;
+  try {
+    const d = await getJson(REST_PREMIUM);
+    lastMarkWrite = now;
+    write(JSON.stringify({ k: 'k', lt: now, T: d.time, mark: d.markPrice, index: d.indexPrice, fr: d.lastFundingRate }));
+  } catch (e) { /* transient */ }
+}
+
+// closed-kline fallback: last 3 klines every 60s — same dedupe guard as the stream
+async function pollKline() {
+  try {
+    const u = new URL(REST_KLINES);
+    u.searchParams.set('symbol', SYMBOL);
+    u.searchParams.set('interval', '1m');
+    u.searchParams.set('limit', '3');
+    const rows = await getJson(u.toString());
+    const nowMs = Date.now();
+    for (const r of rows) {
+      const t = Number(r[0]);
+      const closeTime = Number(r[6]);
+      if (closeTime >= nowMs || t === lastKlineT) continue; // forming or already recorded
+      lastKlineT = t;
+      write(JSON.stringify({ k: 'c', t, o: r[1], h: r[2], l: r[3], c: r[4], v: r[5], tb: r[9] }));
+    }
+  } catch (e) { /* transient */ }
+}
+
 // window-end REST kline cross-fill: authoritative 1m bars for the whole window
 async function crossfillCandles() {
   const u = new URL(REST_KLINES);
@@ -154,6 +187,10 @@ async function crossfillCandles() {
 
 pollRest();
 const restTimer = setInterval(pollRest, 15 * 60 * 1000);
+pollMark();
+const markTimer = setInterval(pollMark, 30000);
+pollKline();
+const klineTimer = setInterval(pollKline, 60000);
 connect();
 
 const hbTimer = setInterval(() => {
@@ -166,7 +203,7 @@ const flushTimer = setInterval(() => {
 
 async function finish() {
   console.log('window complete, records:', count);
-  for (const t of [hbTimer, flushTimer, restTimer]) clearInterval(t);
+  for (const t of [hbTimer, flushTimer, restTimer, markTimer, klineTimer]) clearInterval(t);
   await crossfillCandles();
   try { if (file) file.end(); if (ws) ws.close(); } catch (e) { /* */ }
   setTimeout(() => process.exit(0), 2000);
