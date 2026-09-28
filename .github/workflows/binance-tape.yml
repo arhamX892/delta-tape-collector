@@ -7,7 +7,8 @@ name: binance-tape
 
 on:
   schedule:
-    - cron: '20 */6 * * *'   # every 6 hours UTC, offset from delta-tape
+    - cron: '41 */6 * * *'   # every 6h UTC at :41 — off-peak minute (round-hour
+                             # crons get delayed/dropped by GitHub under load)
   workflow_dispatch:          # manual start button
 
 permissions:

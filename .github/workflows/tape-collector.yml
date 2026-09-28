@@ -3,10 +3,11 @@ name: tape-collector
 # Records the Delta India BTCUSD aggressor tape 24/7 on GitHub's servers.
 # Two schedules work together (GitHub caps a single job at 6h, so one job
 # can never cover the whole day by itself):
-#   - main windows:  every 6h, 350 min each  (00:00 06:00 12:00 18:00 UTC)
-#   - bridge windows: 4x/day, 25 min, starting 20 min before each seam so the
-#     gap between main windows is covered even if GitHub delays the cron a
-#     few minutes (05:40 11:40 17:40 23:40 UTC).
+#   - main windows:   every 6h at :33 (off-peak minute — GitHub drops/delays
+#     round-hour crons), 350 min each
+#   - bridge windows: every 6h at :27, 45 min — starts right after each main
+#     window ends and runs into the next one, so cron noise (±20 min) can
+#     never create a gap; overlap is deduped at merge time
 # One NDJSON file per recording window (tape-<date>-<startHHMM>.ndjson), so
 # seam overlap lands in separate files — dedupe by trade timestamp at merge.
 # NOTE: GitHub may auto-disable schedules after 60 days with no repo activity —
@@ -15,12 +16,9 @@ name: tape-collector
 
 on:
   schedule:
-    - cron: '0 */6 * * *'          # main windows
-    # TEMPORARILY DISABLED until the in-flight (old-code) main window commits
-    # ~20:29 UTC — any earlier commit would get its plain `git push` rejected
-    # and lose that whole tape. Re-enable after the first data file lands:
-    # - cron: '40 5,11,17,23 * * *'  # bridge windows across the seams
-  workflow_dispatch:               # manual start button (records a main window)
+    - cron: '33 */6 * * *'          # main windows (off-peak minute)
+    - cron: '27 */6 * * *'          # bridge windows across the seams
+  workflow_dispatch:                # manual start button (records a main window)
 
 permissions:
   contents: write
@@ -29,7 +27,7 @@ concurrency:
   # separate groups so a bridge job runs in PARALLEL with the tail of the
   # previous main window instead of queueing behind it (queueing would
   # recreate exactly the gap we are bridging)
-  group: ${{ github.event.schedule == '40 5,11,17,23 * * *' && 'tape-bridge' || 'tape-main' }}
+  group: ${{ github.event.schedule == '27 */6 * * *' && 'tape-bridge' || 'tape-main' }}
   cancel-in-progress: false
 
 jobs:
@@ -46,7 +44,7 @@ jobs:
       - name: record tape
         run: node collector/record.js
         env:
-          RECORD_MINUTES: ${{ github.event.schedule == '40 5,11,17,23 * * *' && '25' || '350' }}
+          RECORD_MINUTES: ${{ github.event.schedule == '27 */6 * * *' && '45' || '350' }}
           GIT_SHA: ${{ github.sha }}
 
       - name: commit tape
