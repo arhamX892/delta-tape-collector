@@ -28,6 +28,7 @@ const WS_URL = 'wss://fstream.binance.com/stream?streams=' + [
   'btcusdt@markPrice@1s',
   'btcusdt@kline_1m',
   'btcusdt@depth5@100ms',
+  '!forceOrder@arr',
 ].join('/');
 const REST_OI = 'https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT';
 const REST_TICKER = 'https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT';
@@ -108,6 +109,13 @@ function connect() {
       if (!kl.x || kl.t === lastKlineT) return;
       lastKlineT = kl.t;
       write(JSON.stringify({ k: 'c', t: kl.t, o: kl.o, h: kl.h, l: kl.l, c: kl.c, v: kl.v, tb: kl.V }));
+    } else if (stream.endsWith('@forceOrder') || stream === '!forceOrder@arr') {
+      // liquidation print — the ONE stream the archives discontinued, so this is the
+      // only record that will ever exist. NOTE: Binance SAMPLES this feed (max one
+      // order per symbol per 1000ms) — treat counts as a floor, not a census.
+      // o = { S side ('SELL' = long liquidated), o price, q qty, T time ms }
+      const o = d.o || d;
+      write(JSON.stringify({ k: 'l', lt: Date.now(), T: o.T, side: o.S, p: o.o, q: o.q }));
     } else if (stream.includes('depth5')) {
       // raw passthrough of the ladder top-5, 30 s throttle — parse offline anytime
       const now = Date.now();
