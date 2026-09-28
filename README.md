@@ -8,9 +8,9 @@ for the ML filter.
 
 - Records 4 main windows/day (~5h50m each) plus 4 short bridge windows (25 min)
   that cover the seam between main windows → effectively 24h/day, no gaps
-- Bridge windows overlap each seam by a few minutes, so the daily file can
-  contain a handful of duplicated rows — dedupe exact duplicate rows when
-  merging for training
+- One NDJSON file per recording window (`tape-<date>-<startHHMM>.ndjson`);
+  bridge windows overlap each seam by a few minutes, so dedupe by trade
+  timestamp when merging files for training
 - Commits each window automatically
 - Public repo = free; private also fits the free 2,000 min/month
 - Data is anonymous market data — nothing personal

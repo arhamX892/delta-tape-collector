@@ -47,6 +47,10 @@ jobs:
         run: |
           git config user.name "tape-bot"
           git config user.email "tape-bot@users.noreply.github.com"
+          # another window may have committed while we were recording —
+          # replay our commit on top before pushing (per-window files make
+          # this conflict-free)
+          git pull --rebase origin main
           git add data/
           git diff --cached --quiet || git commit -m "tape ${{ github.run_id }} $(date -u +%F-%H%M)"
           git push

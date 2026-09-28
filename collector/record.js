@@ -18,10 +18,15 @@ let ws = null;
 let file = null;
 let count = 0;
 const endAt = Date.now() + MINUTES * 60 * 1000;
+// one file per recording WINDOW (not per day): two jobs must never write the
+// same path, or the later git push collides with the earlier one and loses a
+// whole window. Merge/dedupe across files at training time.
+const startedAtIso = new Date().toISOString();
 
 function outFile() {
-  const d = new Date().toISOString().slice(0, 10);
-  return path.join(DATA_DIR, `tape-${d}.ndjson`);
+  const d = startedAtIso.slice(0, 10);
+  const hm = startedAtIso.slice(11, 16).replace(':', '');
+  return path.join(DATA_DIR, `tape-${d}-${hm}.ndjson`);
 }
 function write(line) {
   try {
