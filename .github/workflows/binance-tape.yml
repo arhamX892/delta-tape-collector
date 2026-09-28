@@ -1,0 +1,44 @@
+name: binance-tape
+
+# 24/7 blackbox collector for Binance BTCUSDT perpetual (book, funding, OI).
+# Binance archives trade/kline history forever — this job captures what history
+# does NOT have (live book ladder, mark/funding, open interest) every 6h.
+# Offset 20 min from the Delta collector's :00 schedule so their pushes never race.
+
+on:
+  schedule:
+    - cron: '20 */6 * * *'   # every 6 hours UTC, offset from delta-tape
+  workflow_dispatch:          # manual start button
+
+permissions:
+  contents: write
+
+concurrency:
+  group: binance-tape
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: record binance tape
+        run: node collector-binance/record.js
+        env:
+          RECORD_MINUTES: '350'
+          GIT_SHA: ${{ github.sha }}
+
+      - name: commit tape
+        run: |
+          git config user.name "tape-bot"
+          git config user.email "tape-bot@users.noreply.github.com"
+          git pull --rebase origin main
+          git add data-binance/
+          git diff --cached --quiet || git commit -m "btape ${{ github.run_id }} $(date -u +%F-%H%M)"
+          git push
