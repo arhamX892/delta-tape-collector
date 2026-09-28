@@ -1,14 +1,21 @@
 /*
  * 24/7 tape collector for Delta India BTCUSD — runs as a GitHub Actions job.
- * Connects to the public WS, records every trade + 1m candle + 1Hz book snapshot
- * + 30s ticker as NDJSON, exits cleanly before the 6h Actions limit, and the
- * workflow commits the file.
+ * BLACKBOX contract: anything a future question could ask about this market
+ * must be on disk. Record kinds (schema v3):
+ *   meta — first line of every file: schema, symbol, window start/duration, git sha
+ *   t    — every trade {t µs, p, s, r, ts publish µs}
+ *   c    — 1m candle frames {cst µs, o,h,l,c,v} (cumulative; reduce last-per-cst)
+ *   o    — book L1 snapshot 1 Hz {ts, ap, bp, as, bs}
+ *   k    — ticker 30 s {ts, sp spot, m mark, ask, bid}
+ *   f    — REST ticker poll 15 min {lt, fr funding, oi, vol24, chg24}
+ *   hb   — heartbeat 60 s (silence = dead socket, not quiet tape)
+ *   rc   — reconnect marker
+ *   x    — raw passthrough of experimental channels (funding_rate, ob_updates),
+ *          throttled 30 s — schemas not fully documented, stored raw so they can
+ *          be parsed offline later
+ *   rc1  — window-end REST /history/candles cross-fill: authoritative 1m OHLCV
+ *          for the whole window, immune to WS frame drops
  * Run locally too: node collector/record.js   (env: RECORD_MINUTES, default 350)
- *
- * v2 (audit 2026-09-28): spread/book, ticker and funding are HARD arming inputs
- * of the advisor engine — they can never be backfilled, so they must be recorded
- * from day one or 6 months of tape trains a filter blind to its own cost gate.
- * Record kinds: meta | t(trade) | c(candle) | o(book L1) | k(ticker) | f(funding) | hb | rc
  */
 'use strict';
 const fs = require('fs');
@@ -17,16 +24,23 @@ const https = require('https');
 
 const WS_URL = 'wss://public-socket.india.delta.exchange';
 const REST_TICKER = 'https://api.india.delta.exchange/v2/tickers/BTCUSD';
+const REST_CANDLES = 'https://api.india.delta.exchange/v2/history/candles';
 const SYMBOL = 'BTCUSD';
 const MINUTES = Number(process.env.RECORD_MINUTES || 350);
 const DATA_DIR = path.join(__dirname, '..', 'data');
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+const GIT_SHA = process.env.GIT_SHA || 'local';
+const REQ_HEADERS = { 'User-Agent': 'tape-collector/3', 'Accept': 'application/json' };
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 let ws = null;
 let file = null;
 let count = 0;
+let lastBookWrite = 0;
+let lastTickerWrite = 0;
+let lastRawWrite = 0;
 const startedAtIso = new Date().toISOString();
+const startSec = Math.floor(Date.parse(startedAtIso) / 1000);
 const endAt = Date.now() + MINUTES * 60 * 1000;
 // one file per recording WINDOW (not per day): two jobs must never write the
 // same path, or the later git push collides with the earlier one and loses a
@@ -44,6 +58,19 @@ function write(line) {
     if (count % 5000 === 0) console.log('records:', count);
   } catch (e) { console.error('write error:', e.message); }
 }
+function getJson(url) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { timeout: 15000, headers: REQ_HEADERS }, (res) => {
+      let body = '';
+      res.on('data', (ch) => { body += ch; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)); } catch (e) { reject(new Error('non-JSON response')); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+  });
+}
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -52,12 +79,19 @@ function connect() {
     console.log('connected', WS_URL);
     // meta must be the FIRST line of every window: the merge script derives
     // interval ownership (dedupe) and window duration from it
-    write(JSON.stringify({ k: 'meta', v: SCHEMA_VERSION, sym: SYMBOL, start: startedAtIso, durMin: MINUTES }));
+    write(JSON.stringify({ k: 'meta', v: SCHEMA_VERSION, sym: SYMBOL, start: startedAtIso, durMin: MINUTES, sha: GIT_SHA }));
+    // core channels first — schema-verified, the engine's own inputs
     ws.send(JSON.stringify({ type: 'subscribe', payload: { channels: [
       { name: 'trades', symbols: [SYMBOL] },
       { name: 'candlestick_1m', symbols: [SYMBOL] },
       { name: 'ob_l1', symbols: [SYMBOL] },
       { name: 'ticker', symbols: [SYMBOL] },
+    ] } }));
+    // experimental channels in a SEPARATE subscribe so a rejection can never
+    // take down the core streams; frames stored raw (kind x)
+    ws.send(JSON.stringify({ type: 'subscribe', payload: { channels: [
+      { name: 'funding_rate', symbols: [SYMBOL] },
+      { name: 'ob_updates', symbols: [SYMBOL] },
     ] } }));
   });
   on('message', (ev) => {
@@ -88,6 +122,12 @@ function connect() {
       if (!d) return;
       const q = Array.isArray(d.q) ? d.q : [];
       write(JSON.stringify({ k: 'k', ts: m.ts, sp: m.sp, m: d.m, ask: q[0], bid: q[2] }));
+    } else if (m.type === 'funding_rate' || m.type === 'ob_updates') {
+      // raw passthrough, 30 s throttle — parse offline whenever needed
+      const now = Date.now();
+      if (now - lastRawWrite < 30000) return;
+      lastRawWrite = now;
+      write(JSON.stringify({ k: 'x', lt: new Date().toISOString(), ch: m.type, raw: m }));
     }
   });
   on('error', (e) => console.error('ws error:', e.message || e.error || 'unknown'));
@@ -100,32 +140,35 @@ function connect() {
   });
 }
 
-let lastBookWrite = 0;
-let lastTickerWrite = 0;
-
-// funding rate: the public ticker WS channel carries none — poll the REST
-// ticker like the extension does (8h funding; 15min poll = 96 tiny calls/day)
-function pollFunding() {
-  const req = https.get(REST_TICKER, {
-    timeout: 10000,
-    headers: { 'User-Agent': 'tape-collector/2', 'Accept': 'application/json' },
-  }, (res) => {
-    let body = '';
-    res.on('data', (ch) => { body += ch; });
-    res.on('end', () => {
-      try {
-        const r = JSON.parse(body).result;
-        if (r && r.funding_rate != null) {
-          write(JSON.stringify({ k: 'f', lt: new Date().toISOString(), fr: r.funding_rate }));
-        }
-      } catch (e) { console.error('funding parse:', e.message); }
-    });
-  });
-  req.on('error', (e) => console.error('funding poll:', e.message));
-  req.on('timeout', () => req.destroy());
+// REST ticker poll: funding rate + open interest + 24h volume/change — the
+// public WS ticker carries none of these (8h funding; 15 min poll = 96/day)
+async function pollRestTicker() {
+  try {
+    const r = (await getJson(REST_TICKER)).result;
+    if (r) {
+      write(JSON.stringify({
+        k: 'f', lt: new Date().toISOString(),
+        fr: r.funding_rate, oi: r.oi_contracts, vol24: r.volume, chg24: r.mark_change_24h,
+      }));
+    }
+  } catch (e) { console.error('rest ticker poll:', e.message); }
 }
-pollFunding();
-const fundingTimer = setInterval(pollFunding, 15 * 60 * 1000);
+
+// window-end REST candle cross-fill: authoritative 1m OHLCV for the whole
+// window — heals any WS frame drops and lets the merge script validate the
+// candle stream instead of trusting it
+async function crossfillCandles() {
+  const endSec = Math.floor(Date.now() / 1000);
+  const url = `${REST_CANDLES}?resolution=1m&symbol=${SYMBOL}&start=${startSec}&end=${endSec}`;
+  try {
+    const rows = (await getJson(url)).result || [];
+    for (const c of rows) write(JSON.stringify({ k: 'rc1', t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.volume }));
+    console.log('crossfill candles:', rows.length);
+  } catch (e) { console.error('crossfill candles:', e.message); }
+}
+
+pollRestTicker();
+const fundingTimer = setInterval(pollRestTicker, 15 * 60 * 1000);
 
 connect();
 
@@ -139,9 +182,10 @@ const flushTimer = setInterval(() => {
   if (file) console.log('alive, records:', count);
 }, 60000);
 
-function finish() {
+async function finish() {
   console.log('window complete, records:', count);
   for (const t of [hbTimer, flushTimer, fundingTimer]) clearInterval(t);
+  await crossfillCandles();
   try { if (file) file.end(); if (ws) ws.close(); } catch (e) { /* */ }
   setTimeout(() => process.exit(0), 2000);
 }

@@ -45,6 +45,7 @@ jobs:
         run: node collector/record.js
         env:
           RECORD_MINUTES: ${{ github.event.schedule == '40 5,11,17,23 * * *' && '25' || '350' }}
+          GIT_SHA: ${{ github.sha }}
 
       - name: commit tape
         run: |
