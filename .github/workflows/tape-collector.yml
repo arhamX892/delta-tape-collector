@@ -1,18 +1,30 @@
 name: tape-collector
 
-# Records the Delta India BTCUSD aggressor tape ~24/7 in near-continuous 6h windows.
+# Records the Delta India BTCUSD aggressor tape 24/7 on GitHub's servers.
+# Two schedules work together (GitHub caps a single job at 6h, so one job
+# can never cover the whole day by itself):
+#   - main windows:  every 6h, 350 min each  (00:00 06:00 12:00 18:00 UTC)
+#   - bridge windows: 4x/day, 25 min, starting 20 min before each seam so the
+#     gap between main windows is covered even if GitHub delays the cron a
+#     few minutes (05:40 11:40 17:40 23:40 UTC).
+# Both append to the same tape-<UTC-date>.ndjson, so the seam overlap shows
+# up as duplicated rows — dedupe exact duplicate rows at merge/training time.
 # Runs free on a public repo (private repos also fit the 2000 free min/month).
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # every 6 hours UTC
-  workflow_dispatch:          # manual start button
+    - cron: '0 */6 * * *'          # main windows
+    - cron: '40 5,11,17,23 * * *'  # bridge windows across the seams
+  workflow_dispatch:               # manual start button (records a main window)
 
 permissions:
   contents: write
 
 concurrency:
-  group: tape-collector
+  # separate groups so a bridge job runs in PARALLEL with the tail of the
+  # previous main window instead of queueing behind it (queueing would
+  # recreate exactly the gap we are bridging)
+  group: ${{ github.event.schedule == '40 5,11,17,23 * * *' && 'tape-bridge' || 'tape-main' }}
   cancel-in-progress: false
 
 jobs:
@@ -26,10 +38,10 @@ jobs:
         with:
           node-version: '22'
 
-      - name: record tape (~5h50m)
+      - name: record tape
         run: node collector/record.js
         env:
-          RECORD_MINUTES: '350'
+          RECORD_MINUTES: ${{ github.event.schedule == '40 5,11,17,23 * * *' && '25' || '350' }}
 
       - name: commit tape
         run: |

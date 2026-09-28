@@ -6,7 +6,11 @@ for the ML filter.
 
 **Setup: just push these files to a GitHub repo and enable Actions — nothing else.**
 
-- Records 4 windows/day (~5h50m each) ≈ 23h20m of tape
+- Records 4 main windows/day (~5h50m each) plus 4 short bridge windows (25 min)
+  that cover the seam between main windows → effectively 24h/day, no gaps
+- Bridge windows overlap each seam by a few minutes, so the daily file can
+  contain a handful of duplicated rows — dedupe exact duplicate rows when
+  merging for training
 - Commits each window automatically
 - Public repo = free; private also fits the free 2,000 min/month
 - Data is anonymous market data — nothing personal
