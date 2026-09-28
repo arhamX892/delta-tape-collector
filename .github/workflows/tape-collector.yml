@@ -14,7 +14,10 @@ name: tape-collector
 on:
   schedule:
     - cron: '0 */6 * * *'          # main windows
-    - cron: '40 5,11,17,23 * * *'  # bridge windows across the seams
+    # TEMPORARILY DISABLED until the in-flight (old-code) main window commits
+    # ~20:29 UTC — any earlier commit would get its plain `git push` rejected
+    # and lose that whole tape. Re-enable after the first data file lands:
+    # - cron: '40 5,11,17,23 * * *'  # bridge windows across the seams
   workflow_dispatch:               # manual start button (records a main window)
 
 permissions:
