@@ -24,19 +24,23 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
+// SYMBOL via env (default BTCUSDT — the original collector). XAUT: SYMBOL=XAUTUSDT
+// writes to data-binance-xaut/ so per-symbol histories never mix.
+const SYMBOL = process.env.SYMBOL || 'BTCUSDT';
+const LC = SYMBOL.toLowerCase();
+const PER_SYMBOL_DIR = SYMBOL === 'BTCUSDT' ? 'data-binance' : 'data-binance-' + LC;
 const WS_URL = 'wss://fstream.binance.com/stream?streams=' + [
-  'btcusdt@bookTicker',
-  'btcusdt@markPrice@1s',
-  'btcusdt@kline_1m',
-  'btcusdt@depth5@100ms',
+  LC + '@bookTicker',
+  LC + '@markPrice@1s',
+  LC + '@kline_1m',
+  LC + '@depth5@100ms',
   '!forceOrder@arr',
 ].join('/');
-const REST_OI = 'https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT';
-const REST_TICKER = 'https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT';
+const REST_OI = 'https://fapi.binance.com/fapi/v1/openInterest?symbol=' + SYMBOL;
+const REST_TICKER = 'https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=' + SYMBOL;
 const REST_KLINES = 'https://fapi.binance.com/fapi/v1/klines';
-const SYMBOL = 'BTCUSDT';
 const MINUTES = Number(process.env.RECORD_MINUTES || 350);
-const DATA_DIR = path.join(__dirname, '..', 'data-binance');
+const DATA_DIR = path.join(__dirname, '..', PER_SYMBOL_DIR);
 const SCHEMA = 'B1';
 const GIT_SHA = process.env.GIT_SHA || 'local';
 const REQ_HEADERS = { 'User-Agent': 'tape-collector-binance/1', 'Accept': 'application/json' };

@@ -1,0 +1,45 @@
+name: xaut-tape
+
+# 24/7 blackbox collector for Binance XAUTUSDT (Tether Gold) perpetual.
+# Same rationale as binance-tape: captures what Binance archives do NOT have
+# (live book ladder, mark/funding, OI) every 6h. Offset :47 from the other
+# collectors so pushes never race.
+
+on:
+  schedule:
+    - cron: '47 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xaut-tape
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: record xaut tape
+        run: node collector-binance/record.js
+        env:
+          RECORD_MINUTES: '350'
+          SYMBOL: 'XAUTUSDT'
+          GIT_SHA: ${{ github.sha }}
+
+      - name: commit tape
+        run: |
+          git config user.name "tape-bot"
+          git config user.email "tape-bot@users.noreply.github.com"
+          git pull --rebase origin main
+          git add data-binance-xaut/
+          git diff --cached --quiet || git commit -m "xauttape ${{ github.run_id }} $(date -u +%F-%H%M)"
+          git push
